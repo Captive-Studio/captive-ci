@@ -1,0 +1,158 @@
+name: Release NPM
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: "Node.js version to use"
+        type: string
+        default: "lts/*"
+      packages-dir:
+        description: "Monorepo workspace dir containing publishable packages (e.g. 'packages', 'libs'). Leave empty to publish a single package from the repo root."
+        type: string
+        default: ""
+      registry-url:
+        description: "npm registry URL"
+        type: string
+        default: "https://registry.npmjs.org"
+    secrets:
+      NPM_TOKEN:
+        description: "npm auth token with publish access"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release-npm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: ${{ inputs.node-version }}
+          registry-url: ${{ inputs.registry-url }}
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
+        with:
+          generate_release_notes: true
+
+      - name: Check npm auth
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm whoami
+
+      - name: Build package
+        if: inputs.packages-dir == ''
+        run: npm run build --if-present
+
+      - name: Publish package to npm
+        if: inputs.packages-dir == ''
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public
+
+      - name: Resolve workspace package order
+        if: inputs.packages-dir != ''
+        env:
+          PACKAGES_DIR: ${{ inputs.packages-dir }}
+        run: |
+          node <<'NODE' > /tmp/release-npm-packages.txt
+          const fs = require('fs');
+          const path = require('path');
+
+          const root = process.cwd();
+          const packagesDir = path.join(root, process.env.PACKAGES_DIR);
+          const entries = fs
+            .readdirSync(packagesDir, { withFileTypes: true })
+            .filter((d) => d.isDirectory())
+            .map((d) => path.join(packagesDir, d.name, 'package.json'))
+            .filter((p) => fs.existsSync(p));
+
+          const pkgs = entries
+            .map((pkgJsonPath) => ({
+              dir: path.dirname(pkgJsonPath),
+              json: JSON.parse(fs.readFileSync(pkgJsonPath, 'utf8')),
+            }))
+            .filter(({ json }) => !json.private);
+
+          const localNames = new Set(pkgs.map((p) => p.json.name));
+          const graph = new Map();
+          const indegree = new Map();
+
+          for (const pkg of pkgs) {
+            graph.set(pkg.json.name, new Set());
+            indegree.set(pkg.json.name, 0);
+          }
+
+          for (const pkg of pkgs) {
+            const localDeps = new Set();
+            for (const field of ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']) {
+              const deps = pkg.json[field] || {};
+              for (const depName of Object.keys(deps)) {
+                if (localNames.has(depName) && depName !== pkg.json.name) {
+                  localDeps.add(depName);
+                }
+              }
+            }
+
+            // Edge: dependency -> dependent (so dependencies are built/published first)
+            for (const depName of localDeps) {
+              if (!graph.get(depName).has(pkg.json.name)) {
+                graph.get(depName).add(pkg.json.name);
+                indegree.set(pkg.json.name, indegree.get(pkg.json.name) + 1);
+              }
+            }
+          }
+
+          const queue = Array.from(indegree.entries())
+            .filter(([, deg]) => deg === 0)
+            .map(([name]) => name)
+            .sort();
+
+          const ordered = [];
+          while (queue.length > 0) {
+            const name = queue.shift();
+            ordered.push(name);
+            const nexts = Array.from(graph.get(name)).sort();
+            for (const next of nexts) {
+              indegree.set(next, indegree.get(next) - 1);
+              if (indegree.get(next) === 0) {
+                queue.push(next);
+                queue.sort();
+              }
+            }
+          }
+
+          // Fallback stable: ordre alphabétique en cas de cycle de dépendances.
+          const names = ordered.length === pkgs.length ? ordered : pkgs.map((p) => p.json.name).sort();
+
+          for (const name of names) {
+            console.log(name);
+          }
+          NODE
+
+      - name: Build packages (ordre topologique)
+        if: inputs.packages-dir != ''
+        run: |
+          while IFS= read -r name; do
+            [[ -z "$name" ]] && continue
+            echo "  Build $name..."
+            npm -w "$name" run build --if-present
+          done < /tmp/release-npm-packages.txt
+
+      - name: Publish packages to npm (ordre topologique)
+        if: inputs.packages-dir != ''
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          while IFS= read -r name; do
+            [[ -z "$name" ]] && continue
+            echo "  Publish $name..."
+            npm -w "$name" publish --access public
+          done < /tmp/release-npm-packages.txt
