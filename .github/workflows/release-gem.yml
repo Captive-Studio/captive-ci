@@ -16,6 +16,9 @@ on:
         type: string
         default: ""
     secrets:
+      RUBYGEMS_API_KEY:
+        description: "RubyGems API key with push access"
+        required: true
       HOMEBREW_TAP_TOKEN:
         description: "GitHub PAT with write access to the Homebrew tap repo"
         required: false
@@ -23,7 +26,6 @@ on:
 permissions:
   contents: write
   packages: write
-  id-token: write
 
 jobs:
   release-gem:
@@ -41,14 +43,16 @@ jobs:
         with:
           generate_release_notes: true
 
-      - name: Debug OIDC claims
+      - name: Publish to RubyGems
         run: |
-          TOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=rubygems.org" | jq -r '.value')
-          echo "$TOKEN" | cut -d'.' -f2 | base64 -d 2>/dev/null | jq '{job_workflow_ref,repository,repository_owner,workflow,environment}'
-        shell: bash
-
-      - uses: rubygems/release-gem@v1
+          mkdir -p $HOME/.gem
+          touch $HOME/.gem/credentials
+          chmod 0600 $HOME/.gem/credentials
+          printf -- "---\n:rubygems_api_key: ${RUBYGEMS_API_KEY}\n" > $HOME/.gem/credentials
+          gem build *.gemspec
+          gem push *.gem
+        env:
+          RUBYGEMS_API_KEY: ${{ secrets.RUBYGEMS_API_KEY }}
 
       - name: Publish to GPR
         run: |
