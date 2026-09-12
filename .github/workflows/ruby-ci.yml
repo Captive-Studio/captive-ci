@@ -155,6 +155,27 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
+      # Sans minimum_score, rubycritic sort toujours en 0 : un dépôt sans seuil est vert
+      # quel que soit son score. Le seuil reste la décision du dépôt, qui peut l'assumer
+      # plus bas et le documenter, mais il ne doit pas pouvoir être oublié.
+      - name: Vérifie qu'un seuil de qualité est déclaré
+        env:
+          QUALITY_COMMAND: ${{ inputs.quality-command }}
+        run: |
+          if printf '%s' "$QUALITY_COMMAND" | grep -qE '(^|[[:space:]])(-s|--minimum-score)([[:space:]]|=)'; then
+            echo "Seuil déclaré dans quality-command."
+            exit 0
+          fi
+          if [ ! -f .rubycritic.yml ]; then
+            echo "::error::Aucun .rubycritic.yml : sans minimum_score, rubycritic ne fait jamais échouer ce job, quel que soit le score. Créez le fichier à la racine, avec au moins « minimum_score: 96 » et les « paths: » du dépôt."
+            exit 1
+          fi
+          if ! grep -qE '^[[:space:]]*minimum_score:' .rubycritic.yml; then
+            echo "::error::.rubycritic.yml ne déclare pas minimum_score : sans lui, rubycritic ne fait jamais échouer ce job. Ajoutez par exemple « minimum_score: 96 »."
+            exit 1
+          fi
+          grep -E '^[[:space:]]*minimum_score:' .rubycritic.yml
+
       - name: Cache gems
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
